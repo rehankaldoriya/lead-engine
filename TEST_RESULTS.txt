@@ -1,0 +1,16 @@
+Command: python -m unittest discover -s tests -v
+Exit code: 0
+test_csv_safe_merge (test_core.CoreTests.test_csv_safe_merge) ... ok
+test_dashboard_offline_and_due (test_core.CoreTests.test_dashboard_offline_and_due) ... ok
+test_duplicates (test_core.CoreTests.test_duplicates) ... ok
+test_init_edit_persistence (test_core.CoreTests.test_init_edit_persistence) ... ok
+test_missing_invalid (test_core.CoreTests.test_missing_invalid) ... ok
+test_scoring (test_core.CoreTests.test_scoring) ... ok
+test_network_failure (test_discovery.DiscoveryTests.test_network_failure) ... ok
+test_osm_payload (test_discovery.DiscoveryTests.test_osm_payload) ... ok
+test_query_validation (test_discovery.DiscoveryTests.test_query_validation) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.024s
+
+OK
