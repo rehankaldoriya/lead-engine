@@ -1,156 +1,459 @@
-from pathlib import Path
-from datetime import date
-import os,json,shutil,tempfile,sqlite3
-import pandas as pd
 import streamlit as st
-from db import *
-from scoring import score_lead,priority_for_score,DEFAULT_WEIGHTS
-from csv_tools import template_csv,export_csv,import_csv_bytes,import_preview,commit_import
-from discovery import discover,DiscoveryError
-from messaging import generate_message
-st.set_page_config(page_title='ALOREX Lead Engine',page_icon='◈',layout='wide')
-DB_PATH=Path(os.environ.get('ALOREX_LEAD_DB',str(DEFAULT_DB))); init_db(DB_PATH)
-st.markdown('<style>.block-container{padding-top:1.4rem;max-width:1500px}[data-testid="stMetric"]{border:1px solid #e7e7e7;padding:12px 14px;border-radius:12px}</style>',unsafe_allow_html=True)
-def tri_label(v): return 'Unknown' if v is None or v=='' else ('Yes' if int(v)==1 else 'No')
-def tri_value(v): return None if v=='Unknown' else (1 if v=='Yes' else 0)
-def lead_form(old=None,prefix='lead'):
-    o=old or {}
-    with st.form(prefix+'_form'):
-        st.subheader('Business details'); a,b,c=st.columns(3)
-        name=a.text_input('Business name *',o.get('business_name','')); catopts=['']+CATEGORIES; cityopts=['']+CITIES
-        category=b.selectbox('Category',catopts,index=catopts.index(o.get('category','')) if o.get('category','') in catopts else 0)
-        city=c.selectbox('City',cityopts,index=cityopts.index(o.get('city','')) if o.get('city','') in cityopts else 0)
-        a,b,c=st.columns(3); neighbourhood=a.text_input('Neighbourhood',o.get('neighbourhood','')); address=b.text_input('Address',o.get('address','')); website=c.text_input('Website URL',o.get('website',''))
-        a,b,c=st.columns(3); phone=a.text_input('Public business phone',o.get('phone','')); email=b.text_input('Public business email',o.get('email','')); instagram_url=c.text_input('Official Instagram URL',o.get('instagram_url',''))
-        a,b,c=st.columns(3); menu_url=a.text_input('Public menu URL',o.get('menu_url','')); source_url=b.text_input('Source URL',o.get('source_url','')); source_name=c.text_input('Source name',o.get('source_name',''))
-        social_links=st.text_area('Other official social links (one per line)',o.get('social_links',''))
-        st.subheader('Qualification evidence'); labels={'premium_positioning':'Premium or luxury positioning','ambience_presentation':'Ambience / presentation focus','specialty_or_distinctive':'Specialty coffee / distinctive dining','independent_boutique':'Independent / boutique positioning','digital_opportunity':'Plausible digital experience opportunity','expansion_potential':'Multiple locations / expansion potential'}; ev={}; cols=st.columns(3)
-        for i,(k,label) in enumerate(labels.items()):
-            with cols[i%3]: ev[k]=tri_value(st.selectbox(label,['Unknown','Yes','No'],index=['Unknown','Yes','No'].index(tri_label(o.get(k))),key=f'{prefix}_{k}'))
-        adjustment=st.number_input('Manual score adjustment (-100 to +100)',-100,100,int(o.get('manual_adjustment') or 0)); st.caption('Unknown evidence earns zero points. Scores are initial heuristics, not validated predictions.')
-        st.subheader('Research checklist'); a,b,c=st.columns(3); research_premium=a.checkbox('Premium positioning reviewed',bool(o.get('research_premium') or 0)); research_digital_menu=b.checkbox('Digital menu checked',bool(o.get('research_digital_menu') or 0)); research_existing_qr=c.checkbox('Existing QR / ordering checked',bool(o.get('research_existing_qr') or 0))
-        accuracy=st.selectbox('Contact detail accuracy',['Unknown','Yes','No'],index=['Unknown','Yes','No'].index(tri_label(o.get('research_contact_accuracy')))); research_opportunities=st.text_area('Potential improvements (evidence-based)',o.get('research_opportunities','')); research_notes=st.text_area('Research notes',o.get('research_notes',''))
-        st.subheader('Sales pipeline'); a,b,c=st.columns(3); status=a.selectbox('Outreach status',STATUSES,index=STATUSES.index(o.get('outreach_status')) if o.get('outreach_status') in STATUSES else 0); last_contact=b.text_input('Last contact date (YYYY-MM-DD)',o.get('last_contact_date','')); next_followup=c.text_input('Next follow-up date (YYYY-MM-DD)',o.get('next_followup_date',''))
-        a,b,c=st.columns(3); meeting=a.text_input('Meeting date (YYYY-MM-DD)',o.get('meeting_date','')); deal=c.text_input('Deal status / value',o.get('deal_status','')); response=b.text_input('Response notes',o.get('response_notes','')); discovery=st.text_input('Discovery date (YYYY-MM-DD)',o.get('discovery_date') or date.today().isoformat()); verified=st.text_input('Last verified date (YYYY-MM-DD)',o.get('last_verified_date',''))
-        submitted=st.form_submit_button('Save lead',type='primary')
-    if not submitted:return None
-    score,breakdown=score_lead(ev,manual_adjustment=adjustment)
-    return {'business_name':name,'category':category,'city':city,'neighbourhood':neighbourhood,'address':address,'website':website,'phone':phone,'email':email,'instagram_url':instagram_url,'social_links':social_links,'menu_url':menu_url,'source_url':source_url,'source_name':source_name,'discovery_date':discovery,'last_verified_date':verified,'research_notes':research_notes,'outreach_status':status,'last_contact_date':last_contact,'next_followup_date':next_followup,'meeting_date':meeting,'deal_status':deal,'response_notes':response,'manual_adjustment':adjustment,'score':score,'score_explanation':json.dumps(breakdown),**ev,'research_premium':int(research_premium),'research_digital_menu':int(research_digital_menu),'research_existing_qr':int(research_existing_qr),'research_contact_accuracy':tri_value(accuracy),'research_opportunities':research_opportunities}
-st.title('◈ ALOREX Lead Engine'); st.caption('Local-first prospect research and sales pipeline · Ahmedabad & Gandhinagar')
-with st.sidebar:
-    st.markdown('### Navigation'); page=st.radio('Go to',['Dashboard','Leads & pipeline','Add lead','Business discovery','Import / export','Backups & settings']); st.divider(); st.caption(f'Database: `{DB_PATH}`'); st.caption('OSM coverage is incomplete; verify information before outreach.')
-if page=='Dashboard':
-    st.subheader('Filter dashboard')
-    fa,fb,fc,fd,fe=st.columns(5)
-    dcity=fa.selectbox('City',['All']+CITIES,key='dash_city')
-    dcat=fb.selectbox('Category',['All']+CATEGORIES,key='dash_cat')
-    dpriority=fc.selectbox('Priority',['All','High','Medium','Low'],key='dash_priority')
-    dstatus=fd.selectbox('Status',['All']+STATUSES,key='dash_status')
-    dmin=fe.slider('Minimum score',0,100,0,key='dash_score')
-    rows=list_leads(DB_PATH,{'city':dcity,'category':dcat,'outreach_status':dstatus,'min_score':dmin})
-    if dpriority!='All': rows=[r for r in rows if priority_for_score(int(r.get('score') or 0))==dpriority]
-    today=date.today().isoformat()
-    stats={'Total leads':len(rows),'Newly discovered':sum(r.get('discovery_date')==today for r in rows),'High priority':sum(int(r.get('score') or 0)>=70 for r in rows),'Qualified prospects':sum(r.get('outreach_status')=='Qualified' for r in rows),'Ready to contact':sum(r.get('outreach_status')=='Ready to Contact' for r in rows),'Leads contacted':sum(r.get('outreach_status') in ('Contacted','Replied','Meeting Scheduled','Proposal Sent','Won','Lost') for r in rows),'Replies received':sum(r.get('outreach_status')=='Replied' for r in rows),'Meetings scheduled':sum(r.get('outreach_status')=='Meeting Scheduled' for r in rows),'Deals won':sum(r.get('outreach_status')=='Won' for r in rows),'Follow-ups due':sum(r.get('next_followup_date')==today and r.get('outreach_status') not in ('Won','Lost','Not a Fit') for r in rows),'Overdue follow-ups':sum(bool(r.get('next_followup_date')) and r.get('next_followup_date')<today and r.get('outreach_status') not in ('Won','Lost','Not a Fit') for r in rows)}
-    keys=list(stats)
-    for i in range(0,len(keys),4):
-        cols=st.columns(4)
-        for col,k in zip(cols,keys[i:i+4]): col.metric(k,stats[k])
-    st.subheader('Follow-ups needing attention')
-    due=[r for r in rows if r.get('next_followup_date') and r.get('next_followup_date')<=today and r.get('outreach_status') not in ('Won','Lost','Not a Fit')]
-    if due: st.dataframe(pd.DataFrame(due)[['id','business_name','city','outreach_status','next_followup_date','phone','email']],use_container_width=True,hide_index=True)
-    else: st.success('No due or overdue follow-ups for these filters.')
-    st.subheader('Highest-priority leads')
-    if rows: st.dataframe(pd.DataFrame(rows[:10])[['id','business_name','city','category','score','outreach_status','next_followup_date']],use_container_width=True,hide_index=True)
-    else: st.info('No leads match these filters. Add a lead or adjust filters.')
-elif page=='Add lead':
-    d=lead_form(prefix='new')
-    if d:
-        try: lid=add_lead(d,DB_PATH); st.success(f'Saved lead #{lid} · score {d["score"]} ({priority_for_score(d["score"])}).'); st.rerun()
-        except Exception as e: st.error(str(e))
-elif page=='Leads & pipeline':
-    a,b,c,d=st.columns(4); search=a.text_input('Search'); city=b.selectbox('City',['All']+CITIES); cat=c.selectbox('Category',['All']+CATEGORIES); status=d.selectbox('Status',['All']+STATUSES); a,b=st.columns(2); lo=a.slider('Minimum score',0,100,0); hi=b.slider('Maximum score',lo,100,100)
-    rows=list_leads(DB_PATH,{'search':search,'city':city,'category':cat,'outreach_status':status,'min_score':lo,'max_score':hi}); st.caption(f'{len(rows)} lead(s)')
-    if rows:
-        st.dataframe(pd.DataFrame(rows)[['id','business_name','city','category','score','outreach_status','next_followup_date','phone','email']],use_container_width=True,hide_index=True)
-        opts={f"#{r['id']} · {r['business_name']}":r['id'] for r in rows}; selected=st.selectbox('Open lead profile',list(opts)); lid=opts[selected]; lead=get_lead(lid,DB_PATH); tabs=st.tabs(['Profile & edit','Outreach history','Draft message','Delete'])
-        with tabs[0]:
-            st.metric('Lead score',f"{lead['score']}/100",priority_for_score(lead['score'])); st.caption('Score rationale'); st.dataframe(pd.DataFrame(json.loads(lead.get('score_explanation') or '[]')),use_container_width=True,hide_index=True)
-            for label,key in [('Website','website'),('Menu','menu_url'),('Instagram','instagram_url'),('Source','source_url')]:
-                if lead.get(key): st.markdown(f'{label}: [{lead[key]}]({lead[key]})')
-            st.write('Source name:',lead.get('source_name') or 'Not recorded'); edited=lead_form(lead,prefix=f'edit_{lid}')
-            if edited:
-                try: update_lead(lid,edited,DB_PATH); st.success('Lead updated.'); st.rerun()
-                except Exception as e: st.error(str(e))
-        with tabs[1]:
-            with st.form(f'history_{lid}'):
-                ch=st.selectbox('Channel',['WhatsApp','Instagram DM','Email','Phone','In-person','Other']); direction=st.selectbox('Event',['Contact sent','Reply received','Meeting','Note','Follow-up']); msg=st.text_area('Message / notes'); outcome=st.text_input('Outcome'); save=st.form_submit_button('Add history')
-            if save: add_history(lid,ch,direction,msg,outcome,DB_PATH); st.success('History saved.'); st.rerun()
-            history=get_history(lid,DB_PATH)
-            if history: st.dataframe(pd.DataFrame(history),use_container_width=True,hide_index=True)
-            else: st.info('No outreach history yet.')
-        with tabs[2]:
-            channel=st.selectbox('Channel',['WhatsApp','Instagram DM','Email'],key='msg_channel'); purpose=st.selectbox('Purpose',['Initial outreach','No-response follow-up','Follow-up after reply'],key='msg_purpose'); sender=st.text_input('Your sign-off (optional)'); draft=generate_message(lead,channel,purpose,sender); st.text_area('Draft — review/edit before sending',draft,height=220,key='draft_text'); st.caption('Draft only; nothing is sent automatically.')
-            if st.button('Log draft in history'): add_history(lid,channel,'Draft created (not sent)',st.session_state.get('draft_text',draft),db_path=DB_PATH); st.success('Draft logged.')
-        with tabs[3]:
-            st.warning('Deleting also removes outreach history.'); confirm=st.checkbox('I understand and want to delete this lead.')
-            if st.button('Delete lead permanently',disabled=not confirm): delete_lead(lid,DB_PATH); st.success('Deleted.'); st.rerun()
-    else: st.info('No leads match these filters.')
-elif page=='Business discovery':
-    st.subheader('OpenStreetMap business discovery'); st.warning('OSM coverage is incomplete. Results are candidates, not verified classifications or sales-fit assessments.')
-    with st.form('discovery_form'):
-        city=st.selectbox('City',CITIES); cats=st.multiselect('Categories',CATEGORIES[:-1],default=['Cafés','Restaurants']); limit=st.slider('Maximum candidates',10,300,100,10); go=st.form_submit_button('Discover businesses')
-    if go:
-        if not cats: st.error('Choose at least one category.')
+import pandas as pd
+from datetime import datetime
+from modules.database import DatabaseManager
+from modules.discovery import DiscoveryEngine
+from modules.csv_manager import CSVManager
+from modules.deduplication import Deduplicator
+from modules.scoring import ScoringEngine
+from modules.research import ResearchManager
+from modules.outreach import OutreachManager
+from modules.backup import BackupManager
+from modules.utils import fetch_public_website
+
+# Initialize application state
+st.set_page_config(page_title="ALOREX Lead Engine", layout="wide", page_icon="🚀")
+
+# Persistent managers
+if 'db' not in st.session_state:
+    st.session_state.db = DatabaseManager()
+    st.session_state.discovery = DiscoveryEngine(st.session_state.db)
+    st.session_state.csv = CSVManager(st.session_state.db)
+    st.session_state.dedup = Deduplicator(st.session_state.db)
+    st.session_state.scoring = ScoringEngine(st.session_state.db)
+    st.session_state.research = ResearchManager(st.session_state.db)
+    st.session_state.outreach = OutreachManager(st.session_state.db)
+    st.session_state.backup = BackupManager()
+
+db = st.session_state.db
+
+# Sidebar Navigation
+st.sidebar.title("ALOREX Lead Engine")
+st.sidebar.markdown("---")
+page = st.sidebar.radio(
+    "Navigation",
+    [
+        "Dashboard",
+        "Business Discovery",
+        "All Leads",
+        "Lead Profile",
+        "Add Lead",
+        "Research & Qualification",
+        "Follow-ups",
+        "Outreach Generator",
+        "Import / Export",
+        "Backups",
+        "Settings & Data Info"
+    ]
+)
+
+# -----------------------------------------------------------------------------
+# 1. Dashboard
+# -----------------------------------------------------------------------------
+if page == "Dashboard":
+    st.title("🚀 Executive Dashboard")
+
+    # KPIs
+    total_leads = db.fetch_one("SELECT COUNT(*) as count FROM leads")['count']
+    ahmedabad_leads = db.fetch_one("SELECT COUNT(*) as count FROM leads WHERE city = 'Ahmedabad'")['count']
+    gandhinagar_leads = db.fetch_one("SELECT COUNT(*) as count FROM leads WHERE city = 'Gandhinagar'")['count']
+    high_priority = db.fetch_one("SELECT COUNT(*) as count FROM leads WHERE lead_priority = 'High'")['count']
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Leads", total_leads)
+    col2.metric("Ahmedabad", ahmedabad_leads)
+    col3.metric("Gandhinagar", gandhinagar_leads)
+    col4.metric("High Priority", high_priority)
+
+    st.markdown("---")
+
+    # Analytics
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Leads by City")
+        city_data = db.fetch_all("SELECT city, COUNT(*) as count FROM leads GROUP BY city")
+        if city_data:
+            df_city = pd.DataFrame(city_data)
+            st.bar_chart(df_city.set_index('city'))
         else:
-            with st.spinner('Querying OpenStreetMap Overpass…'):
-                try: st.session_state['discovery_results']=discover(city,cats,limit); st.success(f"Found {len(st.session_state['discovery_results'])} named candidates.")
-                except DiscoveryError as e: st.error(str(e))
-                except Exception as e: st.error(f'Discovery error: {e}')
-    candidates=st.session_state.get('discovery_results',[])
-    if candidates:
-        st.caption('Preview before saving. Public details are not independently verified.'); st.dataframe(pd.DataFrame(candidates).drop(columns=['verification_note'],errors='ignore'),use_container_width=True,hide_index=True); selected=st.multiselect('Select candidates to save',list(range(len(candidates))),default=list(range(len(candidates))),format_func=lambda i:f"{candidates[i]['business_name']} · {candidates[i]['category']}")
-        if st.button('Save selected candidates'):
-            added=skipped=0; errors=[]
-            for i in selected:
-                item={k:v for k,v in candidates[i].items() if k!='verification_note'}
-                try: add_lead(item,DB_PATH); added+=1
-                except ValueError as e:
-                    if 'Possible duplicate' in str(e): skipped+=1
-                    else: errors.append(f"{item['business_name']}: {e}")
-                except Exception as e: errors.append(str(e))
-            st.success(f'Saved {added}; skipped duplicates {skipped}; errors {len(errors)}.')
-            if errors: st.write(errors)
-elif page=='Import / export':
-    st.subheader('CSV template'); st.download_button('Download CSV template',template_csv(),'alorex_lead_template.csv','text/csv'); st.subheader('Import CSV'); upload=st.file_uploader('Choose CSV',type=['csv'])
-    if upload:
-        try:
-            df=import_csv_bytes(upload.getvalue()); st.write('Map source columns to lead fields; unmapped columns are ignored.'); mapping={}; cols=st.columns(3)
-            for i,colname in enumerate(df.columns):
-                with cols[i%3]:
-                    target=st.selectbox(f'{colname} →',['Ignore']+LEAD_FIELDS,index=(['Ignore']+LEAD_FIELDS).index(colname) if colname in LEAD_FIELDS else 0,key=f'map_{colname}')
-                    if target!='Ignore': mapping[colname]=target
-            rows,errors=import_preview(df,mapping); st.caption(f'{len(rows)} valid row(s), {len(errors)} validation issue(s)')
-            if errors: st.dataframe(pd.DataFrame(errors),use_container_width=True,hide_index=True)
-            st.dataframe(pd.DataFrame([{**r['data'],'CSV row':r['row_number']} for r in rows]),use_container_width=True,hide_index=True); mode=st.radio('Duplicate handling',['safe','skip'],format_func=lambda x:'Safe update: fill blanks only' if x=='safe' else 'Skip duplicates')
-            if st.button('Import valid rows',type='primary'):
-                result=commit_import(rows,DB_PATH,mode); st.success(f"Added {result['added']}; updated {result['updated']}; skipped {result['skipped']}; errors {len(result['errors'])}.")
-                if result['errors']: st.write(result['errors'])
-        except Exception as e: st.error(str(e))
-    st.subheader('Export'); city=st.selectbox('Export city',['All']+CITIES,key='excity'); status=st.selectbox('Export status',['All']+STATUSES,key='exstatus'); minscore=st.slider('Minimum score',0,100,0,key='exscore'); filtered=list_leads(DB_PATH,{'city':city,'outreach_status':status,'min_score':minscore}); st.download_button(f'Export {len(filtered)} filtered leads',export_csv(filtered),'alorex_leads_filtered.csv','text/csv'); st.download_button('Export all leads',export_csv(list_leads(DB_PATH)),'alorex_leads_all.csv','text/csv')
-elif page=='Backups & settings':
-    st.subheader('Database backup'); st.caption('Local SQLite file; not exposed as a public database endpoint.')
-    if st.button('Prepare backup'): st.session_state['backup_bytes']=DB_PATH.read_bytes() if DB_PATH.exists() else b''
-    if st.session_state.get('backup_bytes'): st.download_button('Download SQLite backup',st.session_state['backup_bytes'],f'alorex-backup-{date.today().isoformat()}.sqlite3','application/octet-stream')
-    st.subheader('Restore backup'); st.warning('Restore replaces the current database. Download a backup first.'); restore=st.file_uploader('Choose backup file',type=['sqlite3','db','sqlite']); confirm=st.checkbox('I understand restore replaces my current database.')
-    if restore and confirm and st.button('Restore database',type='primary'):
-        temp=None
-        try:
-            with tempfile.NamedTemporaryFile(delete=False,suffix='.sqlite3') as f: f.write(restore.getvalue()); temp=Path(f.name)
-            with sqlite3.connect(str(temp)) as check: tables={r[0] for r in check.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if not {'leads','outreach_history'}.issubset(tables): raise ValueError('Not an ALOREX Lead Engine backup.')
-            if DB_PATH.exists(): shutil.copy2(DB_PATH,DB_PATH.with_suffix(DB_PATH.suffix+'.pre-restore.bak'))
-            shutil.copy2(temp,DB_PATH); init_db(DB_PATH); st.success('Restored. A pre-restore backup was saved beside the database.'); st.rerun()
-        except Exception as e: st.error(f'Restore failed: {e}')
-        finally:
-            if temp and temp.exists(): temp.unlink()
-    st.subheader('Scoring rules'); st.dataframe(pd.DataFrame([{'Factor':k.replace('_',' ').title(),'Maximum points':v} for k,v in DEFAULT_WEIGHTS.items()]),use_container_width=True,hide_index=True); st.caption('Weights live in scoring.py. Unknown evidence gets zero points; each lead supports a manual adjustment.')
+            st.write("No data available.")
+
+    with c2:
+        st.subheader("Priority Distribution")
+        priority_data = db.fetch_all("SELECT lead_priority, COUNT(*) as count FROM leads GROUP BY lead_priority")
+        if priority_data:
+            df_priority = pd.DataFrame(priority_data)
+            st.bar_chart(df_priority.set_index('lead_priority'))
+        else:
+            st.write("No data available.")
+
+# -----------------------------------------------------------------------------
+# 2. Business Discovery
+# -----------------------------------------------------------------------------
+elif page == "Business Discovery":
+    st.title("🔍 Business Discovery")
+    st.info("Discover cafés and restaurants in Ahmedabad and Gandhinagar using OpenStreetMap data.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        mode = st.selectbox("Discovery Mode", [
+            "Entire Ahmedabad",
+            "Entire Gandhinagar",
+            "Ahmedabad + Gandhinagar",
+            "Area / Locality",
+            "Radius Search"
+        ])
+
+    with col2:
+        category = st.selectbox("Category", [
+            "All Restaurants & Cafés",
+            "Cafés", "Coffee shops", "Specialty coffee", "Restaurants",
+            "Fine dining", "Casual dining", "Fast casual", "Bakeries",
+            "Patisseries", "Dessert cafés", "Boutique dining", "Hotel restaurants",
+            "Bars/pubs with food", "Food courts"
+        ])
+
+    custom_area = ""
+    if mode == "Area / Locality":
+        custom_area = st.text_input("Enter area name (e.g., Bodakdev, SG Highway)")
+
+    if st.button("Run Discovery"):
+        if mode == "Area / Locality" and not custom_area:
+            st.error("Please enter an area name.")
+        else:
+            cities_to_search = []
+            if mode == "Entire Ahmedabad": cities_to_search = ["Ahmedabad"]
+            elif mode == "Entire Gandhinagar": cities_to_search = ["Gandhinagar"]
+            elif mode == "Ahmedabad + Gandhinagar": cities_to_search = ["Ahmedabad", "Gandhinagar"]
+            elif mode == "Area / Locality": cities_to_search = [custom_area]
+
+            # Simple categories handling
+            cats = [category] if category != "All Restaurants & Cafés" else ["All Restaurants & Cafés"]
+
+            with st.status("Running Discovery Engine...") as status:
+                for city in cities_to_search:
+                    result = st.session_state.discovery.discover(
+                        city, cats,
+                        progress_callback=lambda msg: status.write(msg)
+                    )
+                    if result['status'] == 'success':
+                        st.write(f"✅ {city}: Found {result['total_found']}, New: {result['new_leads']}")
+                    else:
+                        st.error(f"❌ {city}: {result['message']}")
+                status.update(label="Discovery Completed!", state="complete")
+
+# -----------------------------------------------------------------------------
+# 3. All Leads
+# -----------------------------------------------------------------------------
+elif page == "All Leads":
+    st.title("📋 Lead Database")
+
+    # Filters
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        search_query = st.text_input("Search by Name/Area/Phone")
+    with col2:
+        filter_city = st.selectbox("City", ["All"] + list(set([r['city'] for r in db.fetch_all("SELECT city FROM leads")])))
+    with col3:
+        filter_priority = st.selectbox("Priority", ["All", "High", "Medium", "Low"])
+
+    query = "SELECT * FROM leads WHERE 1=1"
+    params = []
+
+    if search_query:
+        query += " AND (business_name LIKE ? OR area LIKE ? OR phone LIKE ?)"
+        params.extend([f"%{search_query}%"] * 3)
+    if filter_city != "All":
+        query += " AND city = ?"
+        params.append(filter_city)
+    if filter_priority != "All":
+        query += " AND lead_priority = ?"
+        params.append(filter_priority)
+
+    leads = db.fetch_all(query, tuple(params))
+    if leads:
+        df = pd.DataFrame(leads)
+        st.dataframe(df[['lead_id', 'business_name', 'area', 'city', 'lead_priority', 'outreach_status', 'phone']])
+    else:
+        st.write("No leads found.")
+
+# -----------------------------------------------------------------------------
+# 4. Lead Profile
+# -----------------------------------------------------------------------------
+elif page == "Lead Profile":
+    st.title("👤 Lead Profile")
+    lead_id = st.number_input("Enter Lead ID", min_value=1, step=1)
+
+    if lead_id:
+        lead = db.get_lead(lead_id)
+        if lead:
+            tab1, tab2, tab3, tab4 = st.tabs(["Overview", "Research", "Qualification", "Sales"])
+
+            with tab1:
+                st.subheader("Business Details")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.text(f"Name: {lead['business_name']}")
+                    st.text(f"Category: {lead['business_category']}")
+                    st.text(f"City: {lead['city']}")
+                    st.text(f"Area: {lead['area']}")
+                with col2:
+                    st.text(f"Phone: {lead['phone']}")
+                    st.text(f"Website: {lead['website']}")
+                    st.text(f"Instagram: {lead['instagram_url']}")
+
+                if lead['website']:
+                    if st.button("Fetch Public Website"):
+                        with st.spinner("Fetching..."):
+                            content = fetch_public_website(lead['website'])
+                            if content:
+                                st.text_area("Website Content Snippet", content, height=300)
+                            else:
+                                st.error("Could not fetch website content.")
+
+            with tab2:
+                st.subheader("Research Checklist")
+                checklist = st.session_state.research.get_checklist(lead_id)
+                for item in checklist:
+                    is_checked = st.checkbox(item['item_key'].replace('_', ' ').title(), value=item['is_checked'], key=f"check_{item['item_key']}")
+                    if is_checked != item['is_checked']:
+                        st.session_state.research.update_checklist_item(lead_id, item['item_key'], is_checked)
+
+                notes = st.text_area("Research Notes", value=lead['research_notes'] or "")
+                v_status = st.selectbox("Verification Status", ["Unverified", "Partially Verified", "Verified", "Needs Reverification"], index=0)
+                if st.button("Save Research"):
+                    st.session_state.research.update_research_notes(lead_id, notes, v_status)
+                    st.success("Saved!")
+
+            with tab3:
+                st.subheader("Lead Scoring")
+                # Preliminary scores input
+                factors = ["Premium positioning", "Ambience/Experience", "Specialty Concept", "Independent/Boutique", "Digital Opportunity", "Expansion Potential"]
+                evidence_data = {}
+
+                with st.form("scoring_form"):
+                    for f in factors:
+                        col1, col2 = st.columns([1, 3])
+                        with col1:
+                            s = st.number_input(f"{f} (0-25)", 0, 25, key=f"score_{f}")
+                        with col2:
+                            e = st.text_input(f"Evidence for {f}", key=f"ev_{f}")
+                        evidence_data[f] = {"score": s, "evidence": e, "source": "Manual", "confidence": "High"}
+
+                    manual_adj = st.number_input("Manual Adjustment", -100, 100, 0)
+                    adj_reason = st.text_input("Adjustment Reason")
+
+                    if st.form_submit_button("Calculate & Save Score"):
+                        score, breakdown = st.session_state.scoring.calculate_preliminary_score(evidence_data)
+                        st.session_state.scoring.save_score(lead_id, breakdown, manual_adj, adj_reason)
+                        st.success(f"Score updated! Final Score: {score + manual_adj}")
+
+            with tab4:
+                st.subheader("Sales Pipeline")
+                curr_status = lead['outreach_status']
+                new_status = st.selectbox("Status", ["New", "Researching", "Qualified", "Ready to Contact", "Contacted", "Replied", "Meeting Scheduled", "Proposal Sent", "Won", "Lost", "Not a Fit"], index=0)
+                if st.button("Update Status"):
+                    st.session_state.outreach.update_pipeline_status(lead_id, new_status)
+                    st.success("Status updated!")
+
+                st.markdown("---")
+                st.subheader("Activity Log")
+                history = st.session_state.outreach.get_outreach_history(lead_id)
+                if history:
+                    st.table(pd.DataFrame(history))
+                else:
+                    st.write("No activity logged yet.")
+        else:
+            st.error("Lead not found.")
+
+# -----------------------------------------------------------------------------
+# 5. Add Lead
+# -----------------------------------------------------------------------------
+elif page == "Add Lead":
+    st.title("➕ Add New Lead")
+
+    with st.form("add_lead_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            name = st.text_input("Business Name *")
+            city = st.text_input("City *")
+            category = st.text_input("Category")
+            area = st.text_input("Area")
+        with col2:
+            phone = st.text_input("Phone")
+            website = st.text_input("Website")
+            instagram = st.text_input("Instagram URL")
+            email = st.text_input("Email")
+
+        address = st.text_area("Full Address")
+        notes = st.text_area("Research Notes")
+
+        if st.form_submit_button("Save Lead"):
+            if not name or not city:
+                st.error("Name and City are required.")
+            else:
+                lead_data = {
+                    "business_name": name, "city": city, "business_category": category,
+                    "area": area, "full_address": address, "phone": phone,
+                    "website": website, "instagram_url": instagram, "email": email,
+                    "research_notes": notes, "verification_status": "Unverified"
+                }
+                # Check duplicates
+                dups = st.session_state.dedup.find_duplicates(lead_data)
+                if dups:
+                    st.warning(f"Possible duplicates found: {len(dups)}")
+                    st.write(dups)
+                    if st.button("Create anyway"):
+                        db.insert_lead(lead_data)
+                        st.success("Lead added!")
+                else:
+                    db.insert_lead(lead_data)
+                    st.success("Lead added!")
+
+# -----------------------------------------------------------------------------
+# 6. Research & Qualification
+# -----------------------------------------------------------------------------
+elif page == "Research & Qualification":
+    st.title("🎯 Research & Qualification")
+    st.info("Focus on high-potential leads and qualify them for ALOREX.")
+
+    unreviewed = db.fetch_all("SELECT * FROM leads WHERE lead_score = 0")
+    if unreviewed:
+        st.write(f"There are {len(unreviewed)} unreviewed leads.")
+        df_unreviewed = pd.DataFrame(unreviewed)
+        st.dataframe(df_unreviewed[['lead_id', 'business_name', 'city', 'area']])
+    else:
+        st.write("All leads have been scored!")
+
+# -----------------------------------------------------------------------------
+# 7. Follow-ups
+# -----------------------------------------------------------------------------
+elif page == "Follow-ups":
+    st.title("📅 Follow-up Management")
+
+    # This is a simplified view. In a full version, we'd filter by date.
+    leads = db.fetch_all("SELECT * FROM leads WHERE next_follow_up_date IS NOT NULL")
+    if leads:
+        st.table(pd.DataFrame(leads)[['lead_id', 'business_name', 'next_follow_up_date', 'outreach_status']])
+    else:
+        st.write("No follow-ups scheduled.")
+
+# -----------------------------------------------------------------------------
+# 8. Outreach Generator
+# -----------------------------------------------------------------------------
+elif page == "Outreach Generator":
+    st.title("✍️ Outreach Message Generator")
+
+    lead_id = st.number_input("Lead ID", min_value=1, step=1)
+    if lead_id:
+        lead = db.get_lead(lead_id)
+        if lead:
+            msg_type = st.selectbox("Message Type", ["Instagram DM", "WhatsApp", "Email", "Follow-up"])
+            draft = st.session_state.outreach.generate_message_draft(lead, msg_type)
+            st.text_area("Draft Message", value=draft, height=300)
+            st.info("Copy the draft above and send it via the respective channel.")
+        else:
+            st.error("Lead not found.")
+
+# -----------------------------------------------------------------------------
+# 9. Import / Export
+# -----------------------------------------------------------------------------
+elif page == "Import / Export":
+    st.title("📂 Data Import / Export")
+
+    tab1, tab2 = st.tabs(["Import CSV", "Export Data"])
+
+    with tab1:
+        st.subheader("Import Leads")
+        if st.button("Download Template"):
+            path = st.session_state.csv.create_template()
+            with open(path, "rb") as f:
+                st.download_button("Download CSV Template", f, "lead_import_template.csv", "text/csv")
+
+        uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+        if uploaded_file:
+            # Save temporarily to file because CSVManager expects path
+            with open("data/imports/temp_import.csv", "wb") as f:
+                f.write(uploaded_file.getbuffer())
+
+            df, errors = st.session_state.csv.parse_csv("data/imports/temp_import.csv")
+            if errors:
+                for e in errors: st.error(e)
+            else:
+                mapping = st.session_state.csv.map_columns(df.columns)
+                st.write("Column Mapping:", mapping)
+
+                analysis = st.session_state.csv.analyze_import(df, mapping)
+                st.write(f"Total: {analysis['total']} | New: {analysis['new']} | Updates: {analysis['updates']}")
+                st.dataframe(pd.DataFrame(analysis['preview']))
+
+                if st.button("Confirm Import"):
+                    new_c, up_c = st.session_state.csv.safe_import(df, mapping)
+                    st.success(f"Import complete! {new_c} new, {up_c} updated.")
+
+    with tab2:
+        st.subheader("Export Leads")
+        leads = db.fetch_all("SELECT * FROM leads")
+        if leads:
+            export_path = "data/export_leads.csv"
+            st.session_state.csv.export_leads(leads, export_path)
+            with open(export_path, "rb") as f:
+                st.download_button("Download All Leads CSV", f, "alorex_leads_export.csv", "text/csv")
+        else:
+            st.write("No data to export.")
+
+# -----------------------------------------------------------------------------
+# 10. Backups
+# -----------------------------------------------------------------------------
+elif page == "Backups":
+    st.title("💾 Database Backups")
+
+    if st.button("Create Now"):
+        path = st.session_state.backup.create_backup()
+        st.success(f"Backup created: {path}")
+
+    st.markdown("---")
+    st.subheader("Available Backups")
+    backups = st.session_state.backup.list_backups()
+    if backups:
+        df_backups = pd.DataFrame(backups)
+        st.table(df_backups[['filename', 'created', 'size']])
+
+        selected_backup = st.selectbox("Select backup to restore", [b['filename'] for b in backups])
+        if st.button("Restore Backup"):
+            backup_path = next(b['path'] for b in backups if b['filename'] == selected_backup)
+            if st.session_state.backup.restore_backup(backup_path):
+                st.success("Database restored successfully!")
+                st.warning("Please restart the application to ensure all connections are fresh.")
+            else:
+                st.error("Restore failed.")
+    else:
+        st.write("No backups found.")
+
+# -----------------------------------------------------------------------------
+# 11. Settings & Data Info
+# -----------------------------------------------------------------------------
+elif page == "Settings & Data Info":
+    st.title("⚙️ Settings & Info")
+    st.markdown('''
+    ### Application Information
+    - **Database**: SQLite (`data/leads.db`)
+    - **Discovery Source**: OpenStreetMap (Overpass API)
+    - **Target Cities**: Ahmedabad, Gandhinagar
+
+    **Data Integrity Note**:
+    OpenStreetMap coverage is community-maintained and incomplete. Businesses absent from OSM will not appear in these results.
+    ''')
+
+    st.markdown("---")
+    st.subheader("Data Completeness View")
+    total = db.fetch_one("SELECT COUNT(*) as count FROM leads")['count']
+    if total > 0:
+        with phone := db.fetch_one("SELECT COUNT(*) as count FROM leads WHERE phone IS NOT NULL AND phone != ''"):
+            st.write(f"Phone coverage: {phone['count']/total:.1%}")
+        with web := db.fetch_one("SELECT COUNT(*) as count FROM leads WHERE website IS NOT NULL AND website != ''"):
+            st.write(f"Website coverage: {web['count']/total:.1%}")
+        with insta := db.fetch_one("SELECT COUNT(*) as count FROM leads WHERE instagram_url IS NOT NULL AND instagram_url != ''"):
+            st.write(f"Instagram coverage: {insta['count']/total:.1%}")
+    else:
+        st.write("No data available to analyze.")
