@@ -448,12 +448,12 @@ elif page == "Settings & Data Info":
     st.markdown("---")
     st.subheader("Data Completeness View")
     total = db.fetch_one("SELECT COUNT(*) as count FROM leads")['count']
-    if total > 0:
-        with phone := db.fetch_one("SELECT COUNT(*) as count FROM leads WHERE phone IS NOT NULL AND phone != ''"):
-            st.write(f"Phone coverage: {phone['count']/total:.1%}")
-        with web := db.fetch_one("SELECT COUNT(*) as count FROM leads WHERE website IS NOT NULL AND website != ''"):
-            st.write(f"Website coverage: {web['count']/total:.1%}")
-        with insta := db.fetch_one("SELECT COUNT(*) as count FROM leads WHERE instagram_url IS NOT NULL AND instagram_url != ''"):
-            st.write(f"Instagram coverage: {insta['count']/total:.1%}")
-    else:
-        st.write("No data available to analyze.")
+    # if total > 0:
+    #     with phone := db.fetch_one("SELECT COUNT(*) as count FROM leads WHERE phone IS NOT NULL AND phone != ''"):
+    #         st.write(f"Phone coverage: {phone['count']/total:.1%}")
+    #     with web := db.fetch_one("SELECT COUNT(*) as count FROM leads WHERE website IS NOT NULL AND website != ''"):
+    #         st.write(f"Website coverage: {web['count']/total:.1%}")
+    #     with insta := db.fetch_one("SELECT COUNT(*) as count FROM leads WHERE instagram_url IS NOT NULL AND instagram_url != ''"):
+    #         st.write(f"Instagram coverage: {insta['count']/total:.1%}")
+    # else:
+    #     st.write("No data available to analyze.")
